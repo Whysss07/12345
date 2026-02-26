@@ -1,0 +1,128 @@
+// 引入所需库
+#include <SoftwareSerial.h>  // 蓝牙软串口库
+#include <ld3320.h>          // LD3320语音识别库
+
+// ---------------------- 硬件配置 ----------------------
+SoftwareSerial BT(8, 9);  // 蓝牙引脚：8=RX（接蓝牙TXD）、9=TX（接蓝牙RXD）
+char bluetoothData;       // 存储蓝牙接收的数据
+const int ledCtrlPin = 10; // 被控LED引脚
+const int voiceStatusLed = 12; // 离线语音状态灯：亮=LD3320启动，灭=LD3320禁用
+bool isBluetoothOnline = false; // 蓝牙（网络）在线标记
+bool isVoiceModuleInit = false; // LD3320是否已初始化
+unsigned long lastBtDataTime = 0;  // 最后一次蓝牙数据时间
+const unsigned long btTimeout = 5000; // 蓝牙超时时间（5秒）
+
+// ---------------------- 语音识别对象（仅声明，不提前初始化）----------------------
+VoiceRecognition Voice;   // 声明语音识别对象
+
+void setup() {
+  // 1. 初始化串口和蓝牙
+  Serial.begin(38400);
+  BT.begin(38400);
+  Serial.println("系统初始化完成！");
+  Serial.println("状态说明：");
+  Serial.println("  状态灯灭 → 蓝牙在线，LD3320禁用");
+  Serial.println("  状态灯亮 → 蓝牙离线，LD3320启动");
+  
+  // 2. 初始化LED引脚
+  pinMode(ledCtrlPin, OUTPUT);
+  pinMode(voiceStatusLed, OUTPUT);
+  digitalWrite(ledCtrlPin, LOW);
+  digitalWrite(voiceStatusLed, LOW); // 初始灭：LD3320禁用
+}
+
+void loop() {
+  // ---------------------- 第一步：检测蓝牙（网络）状态 ----------------------
+  checkBluetoothStatus();
+  
+  // ---------------------- 第二步：根据蓝牙状态执行对应逻辑 ----------------------
+  if (isBluetoothOnline) {
+    // 蓝牙在线：禁用LD3320，状态灯灭，仅响应蓝牙控制
+    digitalWrite(voiceStatusLed, LOW);
+    handleBluetoothControl();
+  } else {
+    // 蓝牙离线：启动LD3320，状态灯亮，响应语音控制
+    digitalWrite(voiceStatusLed, HIGH);
+    initVoiceModuleIfNeeded(); // 仅首次离线时初始化LD3320
+    handleVoiceControl();
+  }
+}
+
+// 检测蓝牙（网络）在线状态
+void checkBluetoothStatus() {
+  unsigned long currentTime = millis();
+  
+  // 有蓝牙数据 → 标记为在线，更新最后数据时间
+  if (BT.available()) {
+    lastBtDataTime = currentTime;
+    isBluetoothOnline = true;
+  }
+  
+  // 超过超时时间无数据 → 标记为离线
+  if (currentTime - lastBtDataTime > btTimeout) {
+    isBluetoothOnline = false;
+  }
+}
+
+// 仅首次离线时初始化LD3320（避免重复初始化）
+void initVoiceModuleIfNeeded() {
+  if (!isVoiceModuleInit) {
+    Serial.println("[离线] 启动LD3320语音识别...");
+    Voice.init();                       // 初始化语音模块
+    Voice.noiseTime(0x10);              // 略过上电噪声
+    Voice.micVol(0x30);                 // 麦克风增益
+    Voice.voiceMaxLength(0x14);         // 最长语音段时间
+    Voice.addCommand("kai", 0);         // 注册"开"指令
+    Voice.addCommand("guan", 1);        // 注册"关"指令
+    Voice.start();                      // 开始识别
+    isVoiceModuleInit = true; // 标记为已初始化
+  }
+}
+
+// 蓝牙控制逻辑（在线时执行）
+void handleBluetoothControl() {
+  // 若LD3320已初始化，蓝牙重连后标记为未初始化（下次离线需重新启动）
+  if (isVoiceModuleInit) {
+    isVoiceModuleInit = false;
+    Serial.println("[在线] 禁用LD3320，切换为蓝牙控制");
+  }
+  
+  if (BT.available()) {
+    bluetoothData = BT.read();
+    Serial.print("[蓝牙控制] 接收指令：");
+    Serial.println(bluetoothData);
+    controlLEDByCommand(bluetoothData);
+  }
+  
+  // 保留串口透传功能
+  if (Serial.available()) {
+    bluetoothData = Serial.read();
+    BT.print(bluetoothData);
+    controlLEDByCommand(bluetoothData);
+  }
+}
+
+// 语音控制逻辑（离线时执行）
+void handleVoiceControl() {
+  if (isVoiceModuleInit) { // 仅初始化后才执行语音识别
+    int voiceCmd = Voice.read();
+    if (voiceCmd == 0) {
+      digitalWrite(ledCtrlPin, HIGH);
+      Serial.println("[语音控制] 识别到'开' → LED已打开");
+    } else if (voiceCmd == 1) {
+      digitalWrite(ledCtrlPin, LOW);
+      Serial.println("[语音控制] 识别到'关' → LED已关闭");
+    }
+  }
+}
+
+// 统一的LED控制函数
+void controlLEDByCommand(char cmd) {
+  if (cmd == '1') {
+    digitalWrite(ledCtrlPin, HIGH);
+    Serial.println("蓝牙指令：开灯 → LED已打开");
+  } else if (cmd == '0') {
+    digitalWrite(ledCtrlPin, LOW);
+    Serial.println("蓝牙指令：关灯 → LED已关闭");
+  }
+}
